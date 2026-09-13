@@ -2,6 +2,7 @@ use std::error::Error;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::{
@@ -382,8 +383,22 @@ impl RunnerApp {
     }
 }
 
+static INTERNAL_CLIPBOARD: Mutex<Option<String>> = Mutex::new(None);
+
+#[cfg(test)]
+pub static CLIPBOARD_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
 /// Helper function to copy text to system clipboard via wl-copy, xclip, or xsel
 pub fn copy_text_to_clipboard(text: &str) {
+    if let Ok(mut guard) = INTERNAL_CLIPBOARD.lock() {
+        *guard = Some(text.to_string());
+    }
+
+    // In unit tests, avoid clobbering system clipboard and avoid multi-threaded test races
+    if cfg!(test) {
+        return;
+    }
+
     // 1. Try wl-copy (Wayland standard)
     if let Ok(mut child) = Command::new("wl-copy").stdin(Stdio::piped()).spawn() {
         if let Some(mut stdin) = child.stdin.take() {
@@ -419,6 +434,50 @@ pub fn copy_text_to_clipboard(text: &str) {
         }
         let _ = child.wait();
     }
+}
+
+fn read_command_stdout(mut cmd: Command) -> Option<String> {
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    if text.is_empty() { None } else { Some(text) }
+}
+
+/// Helper function to read text from system clipboard via wl-paste, xclip, xsel, or internal fallback
+pub fn paste_text_from_clipboard() -> Option<String> {
+    if cfg!(test) {
+        return INTERNAL_CLIPBOARD
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+    }
+
+    // 1. Try wl-paste (Wayland standard)
+    if let Some(text) = read_command_stdout(Command::new("wl-paste")) {
+        return Some(text);
+    }
+
+    // 2. Try xclip (X11 standard)
+    let mut xclip_cmd = Command::new("xclip");
+    xclip_cmd.args(["-selection", "clipboard", "-out"]);
+    if let Some(text) = read_command_stdout(xclip_cmd) {
+        return Some(text);
+    }
+
+    // 3. Try xsel (X11 alternative)
+    let mut xsel_cmd = Command::new("xsel");
+    xsel_cmd.args(["--clipboard", "--output"]);
+    if let Some(text) = read_command_stdout(xsel_cmd) {
+        return Some(text);
+    }
+
+    // 4. Fallback to in-memory clipboard buffer
+    INTERNAL_CLIPBOARD
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
 }
 
 /// Standalone entry point when Tomy is run with `tomy runner <file_path>`

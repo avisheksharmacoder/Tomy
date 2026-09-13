@@ -75,6 +75,7 @@ pub struct EditorScreen {
     pub mouse_selecting: bool,
     pub last_code_area: Option<Rect>,
     pub copy_toast_ticks: u8,
+    pub paste_toast_ticks: u8,
 }
 
 impl EditorScreen {
@@ -110,6 +111,7 @@ impl EditorScreen {
             mouse_selecting: false,
             last_code_area: None,
             copy_toast_ticks: 0,
+            paste_toast_ticks: 0,
         };
         screen.update_token_count();
         screen
@@ -276,6 +278,69 @@ impl EditorScreen {
 
         crate::runner::copy_text_to_clipboard(&text);
         self.copy_toast_ticks = 30;
+    }
+
+    pub fn insert_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        if self.selection.is_some() {
+            self.delete_selection();
+        }
+
+        if self.cursor_row >= self.lines.len() {
+            self.lines.push(String::new());
+        }
+
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let paste_lines: Vec<&str> = normalized.split('\n').collect();
+
+        if paste_lines.len() == 1 {
+            let line = &mut self.lines[self.cursor_row];
+            let byte_idx = char_to_byte_index(line, self.cursor_col);
+            line.insert_str(byte_idx, paste_lines[0]);
+            self.cursor_col += paste_lines[0].chars().count();
+            self.preferred_col = self.cursor_col;
+        } else {
+            let current_line = self.lines[self.cursor_row].clone();
+            let split_byte = char_to_byte_index(&current_line, self.cursor_col);
+            let before = &current_line[..split_byte];
+            let after = &current_line[split_byte..];
+
+            let first_combined = format!("{}{}", before, paste_lines[0]);
+            let last_combined = format!("{}{}", paste_lines[paste_lines.len() - 1], after);
+
+            self.lines[self.cursor_row] = first_combined;
+
+            for (offset, &mid_line) in paste_lines[1..paste_lines.len() - 1].iter().enumerate() {
+                self.lines
+                    .insert(self.cursor_row + 1 + offset, mid_line.to_string());
+            }
+
+            let last_line_idx = self.cursor_row + paste_lines.len() - 1;
+            self.lines.insert(last_line_idx, last_combined);
+
+            self.cursor_row = last_line_idx;
+            self.cursor_col = paste_lines[paste_lines.len() - 1].chars().count();
+            self.preferred_col = self.cursor_col;
+        }
+
+        self.is_modified = true;
+        self.completion.dismiss();
+        self.symbol_index = FileSymbolIndex::extract(&self.lines);
+        self.update_token_count();
+    }
+
+    pub fn paste_from_clipboard(&mut self) {
+        let Some(text) = crate::runner::paste_text_from_clipboard() else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        self.insert_text(&text);
+        self.paste_toast_ticks = 30;
     }
 
     pub fn move_word_left(&mut self) {
@@ -547,6 +612,7 @@ impl EditorScreen {
         let mut hints = vec![
             ("Ctrl+A", "Select All"),
             ("Ctrl+C", "Copy"),
+            ("Ctrl+V", "Paste"),
             ("Ctrl+S", "Save & Ruff"),
             ("Ctrl+←/→", "Skip Word"),
             ("Ctrl+Bksp", "Del Word"),
@@ -625,6 +691,10 @@ impl EditorScreen {
                 }
                 KeyCode::Char('c') | KeyCode::Char('C') => {
                     self.copy_selection_or_all();
+                    return;
+                }
+                KeyCode::Char('v') | KeyCode::Char('V') => {
+                    self.paste_from_clipboard();
                     return;
                 }
                 KeyCode::Left => {
@@ -1310,6 +1380,17 @@ impl EditorScreen {
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        if self.paste_toast_ticks > 0 {
+            self.paste_toast_ticks = self.paste_toast_ticks.saturating_sub(1);
+            status_spans.push(Span::styled(
+                "    ✔ PASTED FROM CLIPBOARD ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ));
         }
@@ -2554,6 +2635,7 @@ mod tests {
 
     #[test]
     fn test_ctrl_a_select_all_and_copy() {
+        let _clip_lock = crate::runner::CLIPBOARD_TEST_MUTEX.lock().unwrap();
         let mut editor = EditorScreen::new();
         editor.lines = vec!["def foo():".to_string(), "    return 42".to_string()];
         assert!(editor.selection.is_none());
@@ -2698,5 +2780,81 @@ mod tests {
         let selection_bg = Color::Rgb(40, 80, 160);
         let has_selected_bg = styled.iter().any(|s| s.style.bg == Some(selection_bg));
         assert!(has_selected_bg);
+    }
+
+    #[test]
+    fn test_ctrl_v_paste_single_and_multiline() {
+        let mut editor = EditorScreen::new();
+        editor.lines = vec!["def main():".to_string(), "    pass".to_string()];
+        editor.cursor_row = 1;
+        editor.cursor_col = 8; // at end of "    pass"
+
+        // Paste single-line text directly
+        editor.insert_text(" # entrypoint");
+        assert_eq!(editor.lines[1], "    pass # entrypoint");
+        assert_eq!(editor.cursor_col, 21);
+
+        // Move to empty line and paste multi-line snippet
+        editor.lines.push(String::new());
+        editor.cursor_row = 2;
+        editor.cursor_col = 0;
+
+        let multiline = "x = 10\ny = 20\nprint(x + y)";
+        editor.insert_text(multiline);
+
+        assert_eq!(editor.lines[2], "x = 10");
+        assert_eq!(editor.lines[3], "y = 20");
+        assert_eq!(editor.lines[4], "print(x + y)");
+        assert_eq!(editor.cursor_row, 4);
+        assert_eq!(editor.cursor_col, 12);
+        assert!(editor.is_modified);
+    }
+
+    #[test]
+    fn test_ctrl_v_paste_replaces_selection() {
+        let mut editor = EditorScreen::new();
+        editor.lines = vec!["print('replace_me')".to_string()];
+        editor.cursor_row = 0;
+        editor.cursor_col = 18;
+        editor.selection = Some(SelectionRange {
+            start: TextPosition { row: 0, col: 7 },
+            end: TextPosition { row: 0, col: 17 },
+        });
+
+        // Paste into active selection
+        editor.insert_text("hello_world");
+        assert_eq!(editor.lines[0], "print('hello_world')");
+        assert!(editor.selection.is_none());
+        assert_eq!(editor.cursor_col, 18);
+    }
+
+    #[test]
+    fn test_ctrl_c_and_ctrl_v_scratch_pad_roundtrip() {
+        let _clip_lock = crate::runner::CLIPBOARD_TEST_MUTEX.lock().unwrap();
+        let scratch_file = std::env::temp_dir().join("tomy_scratch_test_paste.py");
+        std::fs::write(&scratch_file, "val = 42\nresult = val * 2\n").unwrap();
+
+        let mut editor = EditorScreen::new();
+        editor.open_file(&scratch_file);
+        assert_eq!(editor.lines[0], "val = 42");
+
+        // Select all and copy with Ctrl+A and Ctrl+C
+        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(editor.copy_toast_ticks, 30);
+
+        // Clear editor buffer
+        editor.lines = vec![String::new()];
+        editor.cursor_row = 0;
+        editor.cursor_col = 0;
+        editor.selection = None;
+
+        // Paste with Ctrl+V
+        editor.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+        assert_eq!(editor.paste_toast_ticks, 30);
+        assert_eq!(editor.lines[0], "val = 42");
+        assert_eq!(editor.lines[1], "result = val * 2");
+
+        let _ = std::fs::remove_file(scratch_file);
     }
 }
