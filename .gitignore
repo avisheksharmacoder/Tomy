@@ -1,0 +1,50 @@
+# Rust Build Artifacts
+/target/
+**/*.rs.bk
+
+# Python Bytecode & Caches
+__pycache__/
+*.py[cod]
+*$py.class
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# Python Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment Variables & Secrets
+.env
+.env.local
+.env.*.local
+
+# IDEs & Code Editors
+.idea/
+*.iml
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# Swap & Temporary Editor Files
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
+.#*
+
+# Logs & Diagnostics
+*.log
+
+# OS-Specific Metadata
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini

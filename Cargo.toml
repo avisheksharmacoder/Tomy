@@ -1,0 +1,16 @@
+[package]
+name = "tomy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui = "0.30.2"
+crossterm = "0.29"
+ruff = "0.16.7"
+ruff_python_formatter = "0.0.13"
+ruff_linter = "0.16.7"
+ruff_python_ast = "0.0.13"
+ruff_python_parser = "0.0.13"
+tiktoken = "3"
+memmap2 = "0.9"
+rayon = "1.10"
